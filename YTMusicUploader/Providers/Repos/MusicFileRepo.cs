@@ -1191,14 +1191,26 @@ namespace YTMusicUploader.Providers.Repos
 
             try
             {
+                // Match every file *inside* the removed folder. Notes:
+                //  - The pattern is built here, not with SQL '+', because in SQLite '+' is the
+                //    arithmetic operator (not string concatenation), so "@Path + '%'" evaluates to 0
+                //    and matches nothing - which is why removing a folder used to leave its files in
+                //    the upload queue.
+                //  - LIKE wildcards ('%' and '_') that occur literally in the path are escaped (via
+                //    ESCAPE '|', a character illegal in Windows paths) so they can't broaden the match.
+                //  - A trailing separator is enforced so a sibling folder sharing a name prefix
+                //    (e.g. "C:\Music" vs "C:\Music2") isn't swept up as well.
+                string prefix = path.TrimEnd('\\', '/') + "\\";
+                string likePattern = prefix.Replace("%", "|%").Replace("_", "|_") + "%";
+
                 using (var conn = DbConnection())
                 {
                     conn.Open();
                     conn.Execute(
-                            @"UPDATE MusicFiles 
+                            @"UPDATE MusicFiles
                                 SET Removed = 1
-                              WHERE Path LIKE @Path + '%'",
-                            new { path });
+                              WHERE Path LIKE @likePattern ESCAPE '|'",
+                            new { likePattern });
                     conn.Close();
                 }
 

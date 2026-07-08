@@ -32,7 +32,44 @@ namespace YTMusicUploader.Dialogues
             PreloaderVisible(false);
             StatusVisible(false);
 
+            AddSignInWithBrowserButton();
+
             tbCookieValue.Text = MainForm.Settings.AuthenticationCookie ?? "";
+        }
+
+        /// <summary>
+        /// Adds the 'Sign in with browser' button that opens the embedded WebView2 sign-in dialog
+        /// and, on success, drops the captured cookie into the cookie box - which triggers the same
+        /// validation and save path as a manual paste
+        /// </summary>
+        private void AddSignInWithBrowserButton()
+        {
+            var btnSignInWithBrowser = new Button
+            {
+                Text = "Sign in with browser (automatic)",
+                Location = new Point(4, 116),
+                Size = new Size(260, 25),
+                Font = new Font("Segoe UI", 8.25f),
+                UseVisualStyleBackColor = true
+            };
+
+            btnSignInWithBrowser.Click += BtnSignInWithBrowser_Click;
+            panel1.Controls.Add(btnSignInWithBrowser);
+            btnSignInWithBrowser.BringToFront();
+        }
+
+        private void BtnSignInWithBrowser_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new SignInWithBrowser())
+            {
+                if (dialog.ShowDialog(this) == DialogResult.OK &&
+                    !string.IsNullOrEmpty(dialog.CapturedCookie))
+                {
+                    // Setting the text raises CookieValueTextBox_TextChanged, which validates the
+                    // cookie against YouTube Music and saves it on success
+                    tbCookieValue.Text = dialog.CapturedCookie;
+                }
+            }
         }
 
         private void LnkMoreInfo_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)

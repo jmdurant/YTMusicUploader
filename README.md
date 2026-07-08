@@ -31,15 +31,19 @@ Either build from source (see **Building from Source** below) or run the built `
 
 ### 2. Connect your YouTube Music account
 
-YouTube Music has no official upload API, so the app authenticates with your browser session cookie. To copy it:
+YouTube Music has no official upload API, so the app authenticates with your browser session cookie. There are two ways to provide it.
+
+**Option A — Sign in with browser (recommended).** In the **Connect to YouTube Music** dialog, click **"Sign in with browser (automatic)"**. An embedded browser window opens; sign in to your Google account as normal. The window detects when you're connected, captures the cookie for you, and closes automatically — no developer tools required. (This uses the Microsoft Edge WebView2 Runtime, which ships with Windows 11 and current Windows 10; the app will tell you if it needs installing.)
+
+**Option B — Paste the cookie manually (fallback).** If the embedded sign-in ever fails (Google occasionally tightens what it allows in embedded browsers):
 
 1. In a browser, open **[music.youtube.com](https://music.youtube.com)** and make sure you are **logged in**.
 2. Open **Developer Tools** (F12) and select the **Network** tab.
 3. Interact with the page so requests appear, then click a request named **`browse`** (type it into the filter box to find one).
 4. In that request's **Request Headers**, find the **`cookie:`** header and copy its **entire** value.
-5. In the app, open **Connect to YouTube Music** and paste the value into the cookie box.
+5. Paste the value into the cookie box in the Connect dialog.
 
-The app validates the cookie immediately — a green **"Validation Successful"** means you're connected. The session stays valid for roughly two years unless you sign out. (See [ytmusicapi's browser auth guide](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html) for annotated screenshots of this process.)
+Either way, the app validates the cookie immediately — a green **"Validation Successful"** means you're connected. The session stays valid for roughly two years unless you sign out. (See [ytmusicapi's browser auth guide](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html) for annotated screenshots of the manual process.)
 
 &nbsp;
 

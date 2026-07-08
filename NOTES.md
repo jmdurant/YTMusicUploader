@@ -40,8 +40,15 @@ limitations when opted in (native is unaffected):
 - Bridge calls are serialised (one ytmusicapi instance, not thread-safe), so a long
   upload blocks other bridge operations until it finishes. Native runs them concurrently.
 
-**Auth** is unchanged for users: paste the music.youtube.com cookie into the connect
-dialog. Only cookie ("browser") auth can upload — ytmusicapi's OAuth mode cannot.
+**Auth** for users: either "Sign in with browser (automatic)" — an embedded WebView2
+sign-in (`Dialogues\SignInWithBrowser.cs`) that harvests the cookie via
+`CoreWebView2.CookieManager` after login (a desktop-Chrome User-Agent is set so
+Google's "browser may not be secure" heuristic doesn't reject the plain, non-OAuth
+sign-in) — or paste the music.youtube.com cookie manually. Both feed the same
+validation/save path in `ConnectToYTMusic`. The WebView2 SDK was upgraded from the
+2020 `0.9.579-prerelease` (pre-`CookieManager`) to `1.0.4022.49`; needs the Edge
+WebView2 Runtime (ships with Win11). Only cookie ("browser") auth can upload —
+ytmusicapi's OAuth mode cannot.
 
 **Protocol reference:** when the native layer breaks again, diff against
 ytmusicapi's source (`constants.py`, `helpers.py`, `ytmusic.py`, `mixins/uploads.py`,

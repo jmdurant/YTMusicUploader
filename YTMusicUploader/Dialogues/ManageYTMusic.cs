@@ -215,6 +215,17 @@ namespace YTMusicUploader.Dialogues
                 ThreadPool.QueueUserWorkItem(delegate
                 {
                     var playlist = Requests.Playlists.GetPlaylist(MainForm.Settings.AuthenticationCookie, playlistOrBrowseId);
+
+                    // A null result means the fetch failed - don't overwrite the cached entry with
+                    // null (later lookups iterate it), but still restore the UI via the bind call
+                    if (playlist == null)
+                    {
+                        AppendUpdatesText($"Couldn't fetch songs for playlist: {playlistTitle}. Please try again.",
+                                          ColourHelper.HexStringToColor("#8a0000"));
+                        BindPlaylistNodesFromSelect(playlistNode, null, !isDeleting, false, isDeleting);
+                        return;
+                    }
+
                     for (int i = 0; i < Requests.ArtistCache.Playlists.Count; i++)
                     {
                         if (Requests.ArtistCache.Playlists[i].BrowseId == playlistOrBrowseId)
@@ -229,6 +240,16 @@ namespace YTMusicUploader.Dialogues
             else
             {
                 var playlist = Requests.Playlists.GetPlaylist(MainForm.Settings.AuthenticationCookie, playlistOrBrowseId);
+
+                // A null result means the fetch failed - don't overwrite the cached entry with null
+                if (playlist == null)
+                {
+                    AppendUpdatesText($"Couldn't fetch songs for playlist: {playlistTitle}. Please try again.",
+                                      ColourHelper.HexStringToColor("#8a0000"));
+                    BindPlaylistNodesFromSelect(playlistNode, null, !isDeleting, false, isDeleting);
+                    return;
+                }
+
                 for (int i = 0; i < Requests.ArtistCache.Playlists.Count; i++)
                 {
                     if (Requests.ArtistCache.Playlists[i].BrowseId == playlistOrBrowseId)

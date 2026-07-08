@@ -1,5 +1,6 @@
-﻿using JBToolkit.StreamHelpers;
+using JBToolkit.StreamHelpers;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.IO;
 using System.Net;
@@ -9,9 +10,9 @@ namespace YTMusicUploader.Providers
 {
     /// <summary>
     /// YouTube Music API Request Methods
-    /// 
-    /// Thanks to: sigma67: 
-    ///     https://ytmusicapi.readthedocs.io/en/latest/ 
+    ///
+    /// Thanks to: sigma67:
+    ///     https://ytmusicapi.readthedocs.io/en/latest/
     ///     https://github.com/sigma67/ytmusicapi
     /// </summary>
     public partial class Requests
@@ -39,8 +40,45 @@ namespace YTMusicUploader.Providers
             {
                 errorMessage = string.Empty;
 
+                // The 'browse/edit_playlist' endpoint requires the playlist id without the 'VL' prefix
                 if (playlistId.StartsWith("VL"))
                     playlistId = playlistId.Substring(2, playlistId.Length - 2);
+
+                // YouTube Music will not remove a playlist item without its setVideoId
+                if (string.IsNullOrEmpty(setVideoEntityId))
+                {
+                    errorMessage = "Error: A 'setVideoId' is required to remove a playlist item";
+                    return false;
+                }
+
+                // Preferred path: the Python bridge (ytmusicapi)
+                if (Global.PreferPythonBridge && BridgeService.TryEnsureSession(cookieValue))
+                {
+                    try
+                    {
+                        BridgeService.Invoke("remove_playlist_items", new JObject
+                        {
+                            ["playlistId"] = playlistId,
+                            ["videos"] = new JArray(
+                                new JObject
+                                {
+                                    ["videoId"] = videoEntityId,
+                                    ["setVideoId"] = setVideoEntityId
+                                })
+                        });
+
+                        return true;
+                    }
+                    catch (BridgeUnavailableException)
+                    {
+                        // Bridge process died - fall through to the native HttpWebRequest implementation
+                    }
+                    catch (BridgeException e)
+                    {
+                        errorMessage = "Error: " + e.Message;
+                        return false;
+                    }
+                }
 
                 try
                 {
@@ -50,12 +88,7 @@ namespace YTMusicUploader.Providers
                                                             Global.YTMusicParams);
 
                     request = AddStandardHeaders(request, cookieValue);
-
-                    request.ContentType = "application/json; charset=UTF-8";
-                    request.Headers["X-Goog-AuthUser"] = "0";
-                    request.Headers["x-origin"] = "https://music.youtube.com";
-                    request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                    request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                    request = AddApiHeaders(request, cookieValue);
 
                     var context = JsonConvert.DeserializeObject<DeletePlaylistItemRequestContext>(
                                                   SafeFileStream.ReadAllText(
@@ -67,8 +100,11 @@ namespace YTMusicUploader.Providers
                     context.actions[0].setVideoId = setVideoEntityId;
                     context.actions[0].removedVideoId = videoEntityId;
 
-                    byte[] postBytes = GetPostBytes(JsonConvert.SerializeObject(context));
-                    request.ContentLength = postBytes.Length;
+                    byte[] postBytes = GetPostBytes(
+                                            SetDynamicContext(JsonConvert.SerializeObject(
+                                                context,
+                                                Formatting.None,
+                                                new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore })));
 
                     request.ContentLength = postBytes.Length;
                     using (var requestStream = request.GetRequestStream())
@@ -80,14 +116,7 @@ namespace YTMusicUploader.Providers
                     postBytes = null;
                     using (var response = (HttpWebResponse)request.GetResponse())
                     {
-                        string result;
-                        using (var brotli = new Brotli.BrotliStream(response.GetResponseStream(),
-                                                                    System.IO.Compression.CompressionMode.Decompress,
-                                                                    true))
-                        {
-                            var streamReader = new StreamReader(brotli);
-                            result = streamReader.ReadToEnd();
-                        }
+                        string result = ReadResponseBody(response);
 
                         if (result.ToLower().Contains("error"))
                         {

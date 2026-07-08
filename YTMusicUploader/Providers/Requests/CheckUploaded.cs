@@ -525,16 +525,32 @@ namespace YTMusicUploader.Providers
         {
             videoId = string.Empty;
 
+            if (Global.PreferPythonBridge && BridgeService.TryEnsureSession(cookieValue))
+            {
+                try
+                {
+                    return IsSongUploadedViaBridge(artist, album, track, cookieValue, parallel, ref entityId, out videoId);
+                }
+                catch (BridgeUnavailableException)
+                {
+                    // Bridge process died - fall through to the native implementation below
+                }
+                catch (BridgeException e)
+                {
+                    // Command failure - same as the native failure path
+                    var _ = e;
+#if DEBUG
+                    Console.Out.WriteLine("IsSongUploaded: " + e.Message);
+#endif
+                    return false;
+                }
+            }
+
             try
             {
                 var request = (HttpWebRequest)WebRequest.Create(Global.YTMusicBaseUrl + "search" + Global.YTMusicParams);
                 request = AddStandardHeaders(request, cookieValue);
-
-                request.ContentType = "application/json; charset=UTF-8";
-                request.Headers["X-Goog-AuthUser"] = "0";
-                request.Headers["x-origin"] = "https://music.youtube.com";
-                request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                request = AddApiHeaders(request, cookieValue);
 
                 var context = JsonConvert.DeserializeObject<SearchContext>(
                                                 SafeFileStream.ReadAllText(
@@ -547,7 +563,7 @@ namespace YTMusicUploader.Providers
                 else
                     context.query = string.Format("{0} {1}", artist, track);
 
-                byte[] postBytes = GetPostBytes(JsonConvert.SerializeObject(context));
+                byte[] postBytes = GetPostBytes(SetDynamicContext(JsonConvert.SerializeObject(context)));
                 request.ContentLength = postBytes.Length;
 
                 using (var requestStream = request.GetRequestStream())
@@ -559,15 +575,7 @@ namespace YTMusicUploader.Providers
                 postBytes = null;
                 using (var response = (HttpWebResponse)request.GetResponse())
                 {
-                    string result;
-                    using (var brotli = new Brotli.BrotliStream(
-                                                        response.GetResponseStream(),
-                                                        System.IO.Compression.CompressionMode.Decompress,
-                                                        true))
-                    {
-                        var streamReader = new StreamReader(brotli);
-                        result = streamReader.ReadToEnd();
-                    }
+                    string result = ReadResponseBody(response);
 
                     var runObject = JObject.Parse(result);
                     var runs = runObject.Descendants()
@@ -746,6 +754,210 @@ namespace YTMusicUploader.Providers
 #endif
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Descriptor of a candidate already uploaded track to fuzzy match a music file's meta data
+        /// against. Candidates can come from either the native search response or the Python bridge
+        /// </summary>
+        private class UploadSearchCandidate
+        {
+            public string Title { get; set; }
+            public string Artist { get; set; }
+            public string Album { get; set; }
+            public string EntityId { get; set; }
+            public string VideoId { get; set; }
+        }
+
+        /// <summary>
+        /// Python bridge equivalent of the native 'IsSongUploaded' search request: performs a
+        /// 'search_uploads' bridge command for the same search query the native code builds, maps
+        /// the results into candidate track descriptors and runs the same Levenshtein distance
+        /// fuzzy logic similarity matching against them (including the artist cache fallback)
+        /// </summary>
+        /// <param name="artist">Artist name from music file meta tag</param>
+        /// <param name="album">Album name from music file meta tag</param>
+        /// <param name="track">Track or song name from music file meta tag</param>
+        /// <param name="cookieValue">Cookie from a previous YouTube Music sign in via this application (stored in the database)</param>
+        /// <param name="entityId">Output YouTube Music song entity ID if found</param>
+        /// <returns>True if song is found, false otherwise</returns>
+        private static bool IsSongUploadedViaBridge(
+            string artist,
+            string album,
+            string track,
+            string cookieValue,
+            bool parallel,
+            ref string entityId,
+            out string videoId)
+        {
+            string query = !string.IsNullOrEmpty(album)
+                                ? string.Format("{0} {1} {2}", artist, album, track)
+                                : string.Format("{0} {1}", artist, track);
+
+            var bridgeResult = BridgeService.Invoke("search_uploads", new JObject
+            {
+                ["query"] = query
+            });
+
+            var candidates = new List<UploadSearchCandidate>();
+            foreach (var item in bridgeResult)
+            {
+                candidates.Add(new UploadSearchCandidate
+                {
+                    Title = (string)item["title"],
+                    Artist = (string)item["artist"],
+                    Album = (string)item["album"],
+                    EntityId = (string)item["entityId"],
+                    VideoId = (string)item["videoId"]
+                });
+            }
+
+            float matchSuccessMinimum = Global.YTMusicUploadedSimilarityPercentageForMatch;
+
+            if (IsSongUploadedCandidateMatch(candidates,
+                                             artist,
+                                             album,
+                                             track,
+                                             matchSuccessMinimum,
+                                             parallel,
+                                             ref entityId,
+                                             out videoId))
+            {
+                // ytmusicapi's uploads search returns a video ID but no entity ID. When we matched
+                // on the search results but have no entity ID (needed for delete-and-reupload), try
+                // the artist cache to recover it, keeping the video ID we already found
+                if (string.IsNullOrEmpty(entityId))
+                {
+                    string cacheEntityId = entityId;
+                    if (IsPresentInArtistsCache(cookieValue,
+                                                artist,
+                                                album,
+                                                track,
+                                                matchSuccessMinimum,
+                                                parallel,
+                                                ref cacheEntityId,
+                                                out string cacheVideoId))
+                    {
+                        if (!string.IsNullOrEmpty(cacheEntityId))
+                            entityId = cacheEntityId;
+
+                        if (string.IsNullOrEmpty(videoId) && !string.IsNullOrEmpty(cacheVideoId))
+                            videoId = cacheVideoId;
+                    }
+                }
+
+                return true;
+            }
+
+            return IsPresentInArtistsCache(cookieValue,
+                                           artist,
+                                           album,
+                                           track,
+                                           matchSuccessMinimum,
+                                           parallel,
+                                           ref entityId,
+                                           out videoId);
+        }
+
+        /// <summary>
+        /// Runs the existing Levenshtein distance fuzzy logic similarity matching (via
+        /// 'DetermineSimilarity_Parallel' / 'DetermineSimilarity_Standard') over a set of candidate
+        /// track descriptors. Each candidate is evaluated independently - all similarity thresholds
+        /// must be met by the same candidate, and the entity / video IDs are taken from the first
+        /// candidate that fully matches (search results carry a video ID but no entity ID, so the
+        /// two are captured independently)
+        /// </summary>
+        /// <param name="candidates">Candidate track descriptors to match against</param>
+        /// <param name="artist">Artist name from music file meta tag</param>
+        /// <param name="album">Album name from music file meta tag</param>
+        /// <param name="track">Track or song name from music file meta tag</param>
+        /// <param name="entityId">Output YouTube Music song entity ID if found</param>
+        /// <returns>True if song is found, false otherwise</returns>
+        private static bool IsSongUploadedCandidateMatch(
+            List<UploadSearchCandidate> candidates,
+            string artist,
+            string album,
+            string track,
+            float matchSuccessMinimum,
+            bool parallel,
+            ref string entityId,
+            out string videoId)
+        {
+            videoId = string.Empty;
+
+            bool foundTrack = false;
+            foreach (var candidate in candidates)
+            {
+                if (!parallel)
+                    ThreadHelper.SafeSleep(5);
+
+                var runArray = new SearchResultContext.Run[]
+                {
+                    new SearchResultContext.Run { text = candidate.Title },
+                    new SearchResultContext.Run { text = candidate.Artist },
+                    new SearchResultContext.Run { text = candidate.Album }
+                };
+
+                float _artistSimilarity = 0.0f;
+                float _albumSimilartity = 0.0f;
+                float _trackSimilarity = 0.0f;
+
+                if (parallel)
+                {
+                    DetermineSimilarity_Parallel(runArray,
+                                                 artist,
+                                                 album,
+                                                 track,
+                                                 ref _artistSimilarity,
+                                                 ref _albumSimilartity,
+                                                 ref _trackSimilarity,
+                                                 matchSuccessMinimum);
+                }
+                else
+                {
+                    DetermineSimilarity_Standard(runArray,
+                                                 artist,
+                                                 album,
+                                                 track,
+                                                 ref _artistSimilarity,
+                                                 ref _albumSimilartity,
+                                                 ref _trackSimilarity,
+                                                 matchSuccessMinimum);
+                }
+
+                // Each candidate must satisfy every threshold on its own - accumulating maximums
+                // across different candidates could otherwise report a match (and return IDs) that
+                // no single uploaded track actually satisfies
+                bool candidateMatches = !string.IsNullOrEmpty(album)
+                    ? _artistSimilarity >= matchSuccessMinimum &&
+                      _albumSimilartity >= matchSuccessMinimum &&
+                      _trackSimilarity >= matchSuccessMinimum
+                    : _artistSimilarity >= matchSuccessMinimum &&
+                      _trackSimilarity >= matchSuccessMinimum;
+
+                if (candidateMatches)
+                {
+                    foundTrack = true;
+
+                    // Search results carry a video ID but not always an entity ID; capture each
+                    // from the matching candidate independently rather than gating video ID on
+                    // entity ID being present
+                    if (string.IsNullOrEmpty(entityId) && !string.IsNullOrEmpty(candidate.EntityId))
+                        entityId = candidate.EntityId;
+
+                    if (string.IsNullOrEmpty(videoId) && !string.IsNullOrEmpty(candidate.VideoId))
+                        videoId = candidate.VideoId;
+
+                    // A fully matched candidate with both IDs is the best we can do; stop early
+                    if (!string.IsNullOrEmpty(entityId) && !string.IsNullOrEmpty(videoId))
+                        break;
+                }
+            }
+
+            if (videoId == null)
+                videoId = string.Empty;
+
+            return foundTrack;
         }
 
         private static void DetermineSimilarity_Parallel(

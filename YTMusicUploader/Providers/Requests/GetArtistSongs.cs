@@ -43,6 +43,80 @@ namespace YTMusicUploader.Providers
             if (albumSongCollection.Albums == null)
                 albumSongCollection.Albums = new AlbumCollection();
 
+            if (string.IsNullOrEmpty(continuationToken) &&
+                Global.PreferPythonBridge &&
+                BridgeService.TryEnsureSession(cookieValue))
+            {
+                try
+                {
+                    var bridgeResult = BridgeService.Invoke("get_upload_artist_songs", new JObject
+                    {
+                        ["browseId"] = browseId
+                    });
+
+                    foreach (var item in bridgeResult)
+                    {
+                        string coverArtUrl = (string)item["coverUrl"];
+
+                        var song = new Song
+                        {
+                            Title = (string)item["title"],
+                            Duration = (string)item["duration"],
+                            CoverArtUrl = coverArtUrl,
+                            VideoId = (string)item["videoId"],
+                            EntityId = (string)item["entityId"] ?? string.Empty
+                        };
+
+                        bool isSingle = true;
+                        string albumTitle = "[Singles]";
+
+                        if (!string.IsNullOrEmpty((string)item["album"]))
+                        {
+                            isSingle = false;
+                            albumTitle = (string)item["album"];
+                        }
+
+                        if (!albumSongCollection.Albums.AlbumHashSet.Contains(albumTitle))
+                        {
+                            albumSongCollection.Albums.AlbumHashSet.Add(albumTitle);
+
+                            // The album's browse id (when ytmusicapi provides one) doubles as the
+                            // entity id accepted by the delete endpoint, so whole-album deletes work
+                            string albumEntityId = (string)item["albumId"];
+
+                            albumSongCollection.Albums.Add(new Alumb
+                            {
+                                Title = albumTitle,
+                                CoverArtUrl = coverArtUrl,
+                                Songs = new SongCollection(),
+                                EntityId = isSingle
+                                                ? "[Single]"
+                                                : (albumEntityId ?? string.Empty)
+                            });
+                        }
+
+                        albumSongCollection.Songs.Add(song);
+                        if (albumSongCollection.Albums.Where(m => m.Title == albumTitle).Any())
+                            albumSongCollection.Albums.Where(m => m.Title == albumTitle).FirstOrDefault().Songs.Add(song);
+                    }
+
+                    return albumSongCollection;
+                }
+                catch (BridgeUnavailableException)
+                {
+                    // Bridge process died - fall through to the native implementation below
+                }
+                catch (BridgeException e)
+                {
+                    // Command failure - same as the native failure path (return what we have)
+                    var _ = e;
+#if DEBUG
+                    Console.Out.WriteLine("GetArtistSongs: " + e.Message);
+#endif
+                    return albumSongCollection;
+                }
+            }
+
             try
             {
                 var request = (HttpWebRequest)WebRequest.Create(Global.YTMusicBaseUrl +
@@ -55,12 +129,7 @@ namespace YTMusicUploader.Providers
                                                                                 ? Global.YTMusicParams
                                                                                 : Global.YTMusicParams.Replace('?', '&')));
                 request = AddStandardHeaders(request, cookieValue);
-
-                request.ContentType = "application/json; charset=UTF-8";
-                request.Headers["X-Goog-AuthUser"] = "0";
-                request.Headers["x-origin"] = "https://music.youtube.com";
-                request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                request = AddApiHeaders(request, cookieValue);
 
                 var context = JsonConvert.DeserializeObject<BrowseArtistRequestContext>(
                                 SafeFileStream.ReadAllText(
@@ -69,7 +138,7 @@ namespace YTMusicUploader.Providers
                                                             @"AppData\get_artist_context.json")));
 
                 context.browseId = string.Format("{0}", browseId);
-                byte[] postBytes = GetPostBytes(JsonConvert.SerializeObject(context));
+                byte[] postBytes = GetPostBytes(SetDynamicContext(JsonConvert.SerializeObject(context)));
                 request.ContentLength = postBytes.Length;
 
                 using (var requestStream = request.GetRequestStream())
@@ -81,14 +150,7 @@ namespace YTMusicUploader.Providers
                 postBytes = null;
                 using (var response = (HttpWebResponse)request.GetResponse())
                 {
-                    string result;
-                    using (var brotli = new Brotli.BrotliStream(response.GetResponseStream(),
-                                                                System.IO.Compression.CompressionMode.Decompress,
-                                                                true))
-                    {
-                        var streamReader = new StreamReader(brotli);
-                        result = streamReader.ReadToEnd();
-                    }
+                    string result = ReadResponseBody(response);
 
                     if (string.IsNullOrEmpty(continuationToken))
                     {

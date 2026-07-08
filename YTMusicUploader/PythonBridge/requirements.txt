@@ -1,0 +1,2 @@
+ytmusicapi>=1.12.1
+requests>=2.31

@@ -34,6 +34,39 @@ namespace YTMusicUploader.Providers
             if (artistCache == null)
                 artistCache = new ArtistCache();
 
+            if (string.IsNullOrEmpty(continuationToken) &&
+                Global.PreferPythonBridge &&
+                BridgeService.TryEnsureSession(cookieValue))
+            {
+                try
+                {
+                    var bridgeResult = BridgeService.Invoke("get_upload_artists", new JObject());
+                    foreach (var artist in bridgeResult)
+                    {
+                        artistCache.Artists.Add(new ArtistCache.Artist
+                        {
+                            BrowseId = (string)artist["browseId"],
+                            ArtistName = (string)artist["name"]
+                        });
+                    }
+
+                    return artistCache;
+                }
+                catch (BridgeUnavailableException)
+                {
+                    // Bridge process died - fall through to the native implementation below
+                }
+                catch (BridgeException e)
+                {
+                    // Command failure - same as the native failure path (return what we have)
+                    var _ = e;
+#if DEBUG
+                    Console.Out.WriteLine("GetArtists: " + e.Message);
+#endif
+                    return artistCache;
+                }
+            }
+
             try
             {
                 var request = (HttpWebRequest)WebRequest.Create(Global.YTMusicBaseUrl +
@@ -47,16 +80,12 @@ namespace YTMusicUploader.Providers
                                                                                 : Global.YTMusicParams.Replace('?', '&')));
 
                 request = AddStandardHeaders(request, cookieValue);
-
-                request.ContentType = "application/json; charset=UTF-8";
-                request.Headers["X-Goog-AuthUser"] = "0";
-                request.Headers["x-origin"] = "https://music.youtube.com";
-                request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                request = AddApiHeaders(request, cookieValue);
 
                 byte[] postBytes = GetPostBytes(
-                                        SafeFileStream.ReadAllText(
-                                                Path.Combine(Global.WorkingDirectory, @"AppData\get_artists_context.json")));
+                                        SetDynamicContext(
+                                            SafeFileStream.ReadAllText(
+                                                Path.Combine(Global.WorkingDirectory, @"AppData\get_artists_context.json"))));
 
                 request.ContentLength = postBytes.Length;
                 using (var requestStream = request.GetRequestStream())
@@ -68,14 +97,7 @@ namespace YTMusicUploader.Providers
                 postBytes = null;
                 using (var response = (HttpWebResponse)request.GetResponse())
                 {
-                    string result;
-                    using (var brotli = new Brotli.BrotliStream(response.GetResponseStream(),
-                                                                System.IO.Compression.CompressionMode.Decompress,
-                                                                true))
-                    {
-                        var streamReader = new StreamReader(brotli);
-                        result = streamReader.ReadToEnd();
-                    }
+                    string result = ReadResponseBody(response);
 
                     if (string.IsNullOrEmpty(continuationToken))
                     {

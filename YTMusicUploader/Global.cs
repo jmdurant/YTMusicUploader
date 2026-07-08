@@ -224,6 +224,35 @@ namespace YTMusicUploader
             }
         }
 
+        private static bool? _preferPythonBridge = null;
+
+        /// <summary>
+        /// Whether to prefer the Python 'ytmusicapi' bridge over the built-in (native)
+        /// YouTube Music request implementation when a suitable Python runtime is found
+        /// </summary>
+        public static bool PreferPythonBridge
+        {
+            get
+            {
+                if (_preferPythonBridge != null)
+                    return (bool)_preferPythonBridge;
+
+                try
+                {
+                    if (ConfigurationManager.AppSettings["PreferPythonBridge"] != null)
+                        _preferPythonBridge = ConfigurationManager.AppSettings["PreferPythonBridge"].ToBool();
+                    else
+                        _preferPythonBridge = false;
+                }
+                catch
+                {
+                    _preferPythonBridge = false;
+                }
+
+                return (bool)_preferPythonBridge;
+            }
+        }
+
         /// <summary>
         /// Returns the Google visitor ID for YouTube Music request headers
         /// </summary>

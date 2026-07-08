@@ -37,7 +37,7 @@ namespace YTMusicUploader.Dialogues
 
         private void LnkMoreInfo_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
-            Process.Start("https://ytmusicapi.readthedocs.io/en/latest/setup.html");
+            Process.Start("https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html");
         }
 
         private void LnkVideo_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)

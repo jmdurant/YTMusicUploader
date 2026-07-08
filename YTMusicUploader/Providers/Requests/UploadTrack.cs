@@ -1,4 +1,6 @@
-﻿using System;
+﻿using Newtonsoft.Json.Linq;
+using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using YTMusicUploader.Business;
@@ -40,12 +42,78 @@ namespace YTMusicUploader.Providers
                     return false;
                 }
 
+                if (new FileInfo(filePath).Length >= 314572800) // 300 MB - YouTube Music's upload limit
+                {
+                    error = "File is larger than the 300 MB YouTube Music upload limit.";
+                    return false;
+                }
+            }
+            catch (Exception e)
+            {
+                error = e.Message;
+                return false;
+            }
+
+            if (Global.PreferPythonBridge && BridgeService.TryEnsureSession(cookieValue))
+            {
+                try
+                {
+                    var args = new JObject
+                    {
+                        ["path"] = filePath
+                    };
+
+                    if (maxUploadSpeed > 0) // 0 or -1 = unthrottled
+                        args["maxBytesPerSecond"] = maxUploadSpeed;
+
+                    // Report upload progress to the main form the same way the native path's
+                    // ThrottledStream does (percentage uploaded and current speed)
+                    var stopWatch = Stopwatch.StartNew();
+                    BridgeService.InvokeWithProgress("upload_song", args, (sent, total) =>
+                    {
+                        double percentage = total > 0 ? sent / (double)total * 100 : 0;
+                        if (percentage > 100)
+                            percentage = 100;
+
+                        double bytesPerSecond = sent / stopWatch.Elapsed.TotalSeconds;
+
+                        string speed = (bytesPerSecond / 1048576).ToString("0.0") + " MB /s";
+                        mainForm.SetStatusMessage(
+                                    "Uploading: " + percentage.ToString("0") + "% " +
+                                    "(" + speed + ")",
+                                    "Uploading " + speed);
+                    });
+
+                    // A 'conflict' status means the song is already uploaded, which the native
+                    // implementation also treats as a success
+                    return true;
+                }
+                catch (BridgeUnavailableException)
+                {
+                    // Bridge process died - fall through to the native implementation below
+                }
+                catch (BridgeException e)
+                {
+                    // Command failure - same as the native failure path
+                    error = e.Message;
+                    return false;
+                }
+            }
+
+            try
+            {
+                long fileSize = new FileInfo(filePath).Length;
+
                 var startUploadRequest = (HttpWebRequest)WebRequest.Create(Global.YTMusicUploadUrl);
                 startUploadRequest = AddStandardHeaders(startUploadRequest, cookieValue);
 
                 startUploadRequest.ContentType = "application/x-www-form-urlencoded;charset=utf-8";
+                startUploadRequest.Headers["X-Goog-AuthUser"] = "0";
+                startUploadRequest.Headers["x-origin"] = "https://music.youtube.com";
+                startUploadRequest.Headers["X-Goog-Visitor-Id"] = GetVisitorId(cookieValue);
+                startUploadRequest.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
                 startUploadRequest.Headers["X-Goog-Upload-Command"] = "start";
-                startUploadRequest.Headers["X-Goog-Upload-Header-Content-Length"] = new FileInfo(filePath).Length.ToString();
+                startUploadRequest.Headers["X-Goog-Upload-Header-Content-Length"] = fileSize.ToString();
                 startUploadRequest.Headers["X-Goog-Upload-Protocol"] = "resumable";
 
                 byte[] postBytes = GetPostBytes("filename=" + Path.GetFileName(filePath));
@@ -65,6 +133,10 @@ namespace YTMusicUploader.Providers
                     uploadRequest = AddStandardHeaders(uploadRequest, cookieValue);
 
                     uploadRequest.ContentType = "application/x-www-form-urlencoded;charset=utf-8";
+                    uploadRequest.Headers["X-Goog-AuthUser"] = "0";
+                    uploadRequest.Headers["x-origin"] = "https://music.youtube.com";
+                    uploadRequest.Headers["X-Goog-Visitor-Id"] = GetVisitorId(cookieValue);
+                    uploadRequest.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
                     uploadRequest.Headers["X-Goog-Upload-Command"] = "upload, finalize";
                     uploadRequest.Headers["X-Goog-Upload-Offset"] = "0";
 

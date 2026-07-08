@@ -1,4 +1,4 @@
-﻿using JBToolkit.StreamHelpers;
+using JBToolkit.StreamHelpers;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
@@ -13,9 +13,9 @@ namespace YTMusicUploader.Providers
 {
     /// <summary>
     /// YouTube Music API Request Methods
-    /// 
-    /// Thanks to: sigma67: 
-    ///     https://ytmusicapi.readthedocs.io/en/latest/ 
+    ///
+    /// Thanks to: sigma67:
+    ///     https://ytmusicapi.readthedocs.io/en/latest/
     ///     https://github.com/sigma67/ytmusicapi
     /// </summary>
     public partial class Requests
@@ -55,6 +55,88 @@ namespace YTMusicUploader.Providers
                 if (description == null)
                     description = string.Empty;
 
+                // YouTube Music rejects (or crashes on) titles containing angled brackets
+                if (title != null)
+                    title = title.Replace("<", "").Replace(">", "");
+
+                // Preferred path: the Python bridge (ytmusicapi). Its create command doesn't take
+                // the initial track list, so the playlist is created first and the tracks are then
+                // added with a follow-up command (rolled back on failure to keep the all-or-nothing
+                // semantics of the native implementation)
+                if (Global.PreferPythonBridge && BridgeService.TryEnsureSession(cookieValue))
+                {
+                    bool createdViaBridge = false;
+
+                    try
+                    {
+                        var result = BridgeService.Invoke("create_playlist", new JObject
+                        {
+                            ["title"] = title,
+                            ["description"] = description,
+                            ["privacyStatus"] = privacyStatus.ToString().ToUpper()
+                        });
+
+                        playlistId = (string)result["playlistId"] ?? string.Empty;
+                        createdViaBridge = true;
+
+                        // The browse id is just the playlist id prefixed with 'VL' (which is what
+                        // callers store and later hand back to GetPlaylist / GetPlaylists matching)
+                        browseId = string.IsNullOrEmpty(playlistId) || playlistId.StartsWith("VL")
+                                        ? playlistId
+                                        : "VL" + playlistId;
+
+                        if (videoIds != null && videoIds.Count > 0)
+                        {
+                            BridgeService.Invoke("add_playlist_items", new JObject
+                            {
+                                ["playlistId"] = playlistId,
+                                ["videoIds"] = JArray.FromObject(videoIds)
+                            });
+                        }
+
+                        return true;
+                    }
+                    catch (BridgeUnavailableException)
+                    {
+                        if (createdViaBridge && !string.IsNullOrEmpty(playlistId))
+                        {
+                            // The playlist was already created but the bridge died before all tracks
+                            // were added. Falling through to the native path would create a duplicate
+                            // playlist, so return the created one as-is - the missing tracks are
+                            // reconciled on the next playlist-processing pass (which re-fetches the
+                            // online playlist and adds only the tracks it's missing)
+                            return true;
+                        }
+
+                        // Bridge died before creating anything - safe to fall through to native
+                        playlistId = string.Empty;
+                        browseId = string.Empty;
+                    }
+                    catch (BridgeException e)
+                    {
+                        // Best-effort roll back of a playlist that was created but couldn't be
+                        // populated, then fail exactly like the native implementation would
+                        if (createdViaBridge && !string.IsNullOrEmpty(playlistId))
+                        {
+                            try
+                            {
+                                BridgeService.Invoke("delete_playlist", new JObject
+                                {
+                                    ["playlistId"] = playlistId
+                                });
+                            }
+                            catch { }
+                        }
+
+                        playlistId = string.Empty;
+                        browseId = string.Empty;
+
+                        Logger.LogError("CreatePlaylist", "Error creating playlist: " + title, e.Message);
+                        ex = e;
+                        return false;
+                    }
+                }
+
                 try
                 {
                     var request = (HttpWebRequest)WebRequest.Create(
@@ -63,12 +145,7 @@ namespace YTMusicUploader.Providers
                                                             Global.YTMusicParams);
 
                     request = AddStandardHeaders(request, cookieValue);
-
-                    request.ContentType = "application/json; charset=UTF-8";
-                    request.Headers["X-Goog-AuthUser"] = "0";
-                    request.Headers["x-origin"] = "https://music.youtube.com";
-                    request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                    request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                    request = AddApiHeaders(request, cookieValue);
 
                     var context = JsonConvert.DeserializeObject<CreatePlaylistRequestContext>(
                                                   SafeFileStream.ReadAllText(
@@ -81,20 +158,15 @@ namespace YTMusicUploader.Providers
                     context.privacyStatus = privacyStatus.ToString().ToUpper();
                     context.videoIds = videoIds.ToArray();
 
-                    var delta = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);
-                    double utcMinuteOffset = delta.TotalMinutes;
-                    context.context.client.utcOffsetMinutes = (int)utcMinuteOffset;
+                    string body = SetDynamicContext(JsonConvert.SerializeObject(
+                                                        context,
+                                                        Formatting.None,
+                                                        new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }));
+                    originalRequest = body;
 
-                    try
-                    {
-                        originalRequest = JsonConvert.SerializeObject(context);
-                    }
-                    catch { }
-
-                    byte[] postBytes = GetPostBytes(JsonConvert.SerializeObject(context));
+                    byte[] postBytes = GetPostBytes(body);
                     request.ContentLength = postBytes.Length;
 
-                    request.ContentLength = postBytes.Length;
                     using (var requestStream = request.GetRequestStream())
                     {
                         requestStream.Write(postBytes, 0, postBytes.Length);
@@ -104,14 +176,7 @@ namespace YTMusicUploader.Providers
                     postBytes = null;
                     using (var response = (HttpWebResponse)request.GetResponse())
                     {
-                        string result;
-                        using (var brotli = new Brotli.BrotliStream(response.GetResponseStream(),
-                                                                    System.IO.Compression.CompressionMode.Decompress,
-                                                                    true))
-                        {
-                            var streamReader = new StreamReader(brotli);
-                            result = streamReader.ReadToEnd();
-                        }
+                        string result = ReadResponseBody(response);
 
                         if (result.ToLower().Contains("error"))
                             throw new Exception("Error: " + result + ": Original Http Request: " + originalRequest);

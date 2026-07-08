@@ -393,7 +393,11 @@ namespace YTMusicUploader.Dialogues
             else
             {
                 SetTreeViewEnabled(false);
-                if (playlistNode != null)
+
+                // playlist can be null when the fetch failed (GetPlaylist returns null on a hard
+                // failure rather than a misleading empty playlist) - skip binding but still restore
+                // the UI via the shared block below
+                if (playlistNode != null && playlist != null)
                 {
                     var dbPlaylistEntry = MainForm.PlaylistFileRepo.LoadFromPlayListId(playlist.BrowseId).Result;
                     playlistNode.Tag = new MusicManageTreeNodeModel

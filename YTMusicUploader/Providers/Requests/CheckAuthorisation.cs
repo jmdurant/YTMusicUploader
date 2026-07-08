@@ -23,20 +23,36 @@ namespace YTMusicUploader.Providers
         /// <returns>True if successfully authenticated, false otherwise</returns>
         public static bool IsAuthenticated(string cookieValue)
         {
+            if (Global.PreferPythonBridge && BridgeService.TryEnsureSession(cookieValue))
+            {
+                try
+                {
+                    return BridgeService.Invoke("is_authenticated", new Newtonsoft.Json.Linq.JObject())
+                                        .ToObject<bool>();
+                }
+                catch (BridgeUnavailableException)
+                {
+                    // Bridge process died - fall through to the native implementation below
+                }
+                catch (BridgeException e)
+                {
+                    // Command failure (i.e. bad / expired credentials) - same as the native failure path
+                    Console.Out.WriteLine(e.Message);
+
+                    return false;
+                }
+            }
+
             try
             {
                 var request = (HttpWebRequest)WebRequest.Create(Global.YTMusicBaseUrl + "browse" + Global.YTMusicParams);
                 request = AddStandardHeaders(request, cookieValue);
-
-                request.ContentType = "application/json; charset=UTF-8";
-                request.Headers["X-Goog-AuthUser"] = "0";
-                request.Headers["x-origin"] = "https://music.youtube.com";
-                request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                request = AddApiHeaders(request, cookieValue);
 
                 byte[] postBytes = GetPostBytes(
-                                        SafeFileStream.ReadAllText(
-                                                Path.Combine(Global.WorkingDirectory, @"AppData\check_auth_context.json")));
+                                        SetDynamicContext(
+                                            SafeFileStream.ReadAllText(
+                                                Path.Combine(Global.WorkingDirectory, @"AppData\check_auth_context.json"))));
 
                 request.ContentLength = postBytes.Length;
                 using (var requestStream = request.GetRequestStream())
@@ -48,15 +64,7 @@ namespace YTMusicUploader.Providers
                 postBytes = null;
                 using (var response = (HttpWebResponse)request.GetResponse())
                 {
-                    string result;
-                    using (var brotli = new Brotli.BrotliStream(response.GetResponseStream(),
-                                                                System.IO.Compression.CompressionMode.Decompress,
-                                                                true))
-                    {
-                        var streamReader = new StreamReader(brotli);
-                        result = streamReader.ReadToEnd();
-                    }
-
+                    string result = ReadResponseBody(response);
                     object json = JsonConvert.DeserializeObject(result);
                 }
             }

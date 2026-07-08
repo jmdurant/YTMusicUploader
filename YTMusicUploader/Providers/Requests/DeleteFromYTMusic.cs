@@ -26,6 +26,29 @@ namespace YTMusicUploader.Providers
         {
             errorMessage = string.Empty;
 
+            if (Global.PreferPythonBridge && BridgeService.TryEnsureSession(cookieValue))
+            {
+                try
+                {
+                    BridgeService.Invoke("delete_upload_entity", new Newtonsoft.Json.Linq.JObject
+                    {
+                        ["entityId"] = entityId
+                    });
+
+                    return true;
+                }
+                catch (BridgeUnavailableException)
+                {
+                    // Bridge process died - fall through to the native implementation below
+                }
+                catch (BridgeException e)
+                {
+                    // Command failure - same as the native failure path
+                    errorMessage = "Error: " + e.Message;
+                    return false;
+                }
+            }
+
             try
             {
                 var request = (HttpWebRequest)WebRequest.Create(
@@ -34,12 +57,7 @@ namespace YTMusicUploader.Providers
                                                         Global.YTMusicParams);
 
                 request = AddStandardHeaders(request, cookieValue);
-
-                request.ContentType = "application/json; charset=UTF-8";
-                request.Headers["X-Goog-AuthUser"] = "0";
-                request.Headers["x-origin"] = "https://music.youtube.com";
-                request.Headers["X-Goog-Visitor-Id"] = Global.GoogleVisitorId;
-                request.Headers["Authorization"] = GetAuthorisation(GetSAPISIDFromCookie(cookieValue));
+                request = AddApiHeaders(request, cookieValue);
 
                 var context = JsonConvert.DeserializeObject<DeleteFromYTMusicRequestContext>(
                                               SafeFileStream.ReadAllText(
@@ -48,7 +66,7 @@ namespace YTMusicUploader.Providers
                                                                           @"AppData\delete_song_context.json")));
 
                 context.entityId = entityId;
-                byte[] postBytes = GetPostBytes(JsonConvert.SerializeObject(context));
+                byte[] postBytes = GetPostBytes(SetDynamicContext(JsonConvert.SerializeObject(context)));
                 request.ContentLength = postBytes.Length;
 
                 request.ContentLength = postBytes.Length;
@@ -61,14 +79,7 @@ namespace YTMusicUploader.Providers
                 postBytes = null;
                 using (var response = (HttpWebResponse)request.GetResponse())
                 {
-                    string result;
-                    using (var brotli = new Brotli.BrotliStream(response.GetResponseStream(),
-                                                                System.IO.Compression.CompressionMode.Decompress,
-                                                                true))
-                    {
-                        var streamReader = new StreamReader(brotli);
-                        result = streamReader.ReadToEnd();
-                    }
+                    string result = ReadResponseBody(response);
 
                     if (result.ToLower().Contains("error"))
                     {
